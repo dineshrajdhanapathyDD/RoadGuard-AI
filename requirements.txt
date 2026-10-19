@@ -1,0 +1,10 @@
+# RoadGuard AI - pinned Python runtime dependencies (exact versions, no ranges).
+# Mirror of [project].dependencies in pyproject.toml for pip-only workflows.
+#
+# OpenCV 5: opencv-python 5.0.0.93 is published as a prebuilt wheel on PyPI and
+# installs on this platform reporting cv2.__version__ == "5.0.0" (major 5).
+# verify_opencv.py enforces the major-version-5 requirement at runtime.
+opencv-python==5.0.0.93
+numpy==2.2.6
+boto3==1.43.114
+strands-agents==1.61.1

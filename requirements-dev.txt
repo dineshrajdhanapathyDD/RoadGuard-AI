@@ -1,0 +1,6 @@
+# RoadGuard AI - pinned dev/test dependencies (exact versions, no ranges).
+-r requirements.txt
+pytest==9.1.1
+hypothesis==6.170.2
+# Model_Path (ONNX) tooling - Milestone 7. Not needed for the Mock_Runtime backbone.
+onnx==1.23.2

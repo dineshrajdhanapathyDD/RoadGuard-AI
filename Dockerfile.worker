@@ -1,0 +1,33 @@
+# Vision_Worker container (RoadGuard AI, Milestone 6 task 12.5).
+#
+# Runs the REAL OpenCV 5 pipeline + bounded agent on Fargate, off the Lambda
+# path (design: Lambda handles short tasks; long OpenCV processing runs here).
+# Pinned base + pinned Python deps for reproducibility. No credentials baked in;
+# the task role supplies least-privilege AWS access at runtime (18.1, 18.5).
+FROM python:3.13-slim
+
+# OpenCV runtime libs (the opencv-python wheel still needs libGL/glib at runtime).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install pinned Python deps first for layer caching.
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
+
+# Copy the vision + agent packages (the real pipeline and loop).
+COPY vision/ /app/vision/
+COPY agent/ /app/agent/
+COPY infra/handlers/dynamo_store.py /app/dynamo_store.py
+
+ENV PYTHONUNBUFFERED=1 \
+    RUNTIME=mock
+
+# Flat copy so the worker can import the DynamoDB store as a top-level module.
+# (COPY above already places it at /app/dynamo_store.py.)
+
+# The worker entrypoint runs ONE real inspection end to end (verifies OpenCV 5 on boot,
+# downloads the S3 video, runs the pipeline + agent loop, persists to DynamoDB).
+ENTRYPOINT ["python", "-m", "vision.worker_main"]

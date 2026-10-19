@@ -1,0 +1,33 @@
+# AWS Amplify Hosting build spec for the RoadGuard dashboard.
+#
+# Hosts ONLY the static React/Vite frontend (frontend/). It does NOT touch the
+# existing backend (API Gateway / Lambda / DynamoDB / S3 / Fargate / AgentCore),
+# which stay deployed as-is. The dashboard talks to that backend over HTTPS via
+# VITE_API_BASE_URL.
+#
+# IMPORTANT: set VITE_API_BASE_URL in the Amplify app's Environment variables
+# (Amplify console -> App settings -> Environment variables), because the build
+# runs on Amplify's servers and must bake the API URL into the static bundle:
+#   VITE_API_BASE_URL = https://7p1i7iqoyb.execute-api.us-east-1.amazonaws.com/dev
+#
+# Framework: Vite (React 19 + TypeScript + Tailwind). Output dir: frontend/dist.
+version: 1
+frontend:
+  phases:
+    preBuild:
+      commands:
+        - cd frontend
+        - npm ci
+    build:
+      commands:
+        # Vite reads VITE_* env vars at build time; VITE_API_BASE_URL must be
+        # provided by the Amplify environment (see note above).
+        - npm run build
+  artifacts:
+    # baseDirectory is relative to the repo root; Vite emits to frontend/dist.
+    baseDirectory: frontend/dist
+    files:
+      - '**/*'
+  cache:
+    paths:
+      - frontend/node_modules/**/*

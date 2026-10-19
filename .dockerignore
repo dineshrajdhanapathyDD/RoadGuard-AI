@@ -1,0 +1,15 @@
+﻿# Keep the Vision_Worker build context small and clean.
+.git
+.gitignore
+node_modules
+frontend
+infra/cdk.out
+infra/node_modules
+**/__pycache__
+**/*.pyc
+.pytest_cache
+*.md
+.kiro
+vision/samples/*.mp4
+vision/models/*.onnx
+dist

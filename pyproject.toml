@@ -1,0 +1,43 @@
+[project]
+name = "roadguard-ai"
+version = "0.1.0"
+description = "RoadGuard AI - agentic road-safety inspection platform (OpenCV 5 + AWS, Agentic Vision)"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = { text = "MIT" }
+
+# Dependencies are pinned to EXACT versions for reproducible competition deliverables.
+# See README.md "OpenCV 5 availability" for the cv2 version rationale.
+dependencies = [
+    "opencv-python==5.0.0.93",
+    "numpy==2.2.6",
+    "boto3==1.43.114",
+    "strands-agents==1.61.1",
+]
+
+[project.optional-dependencies]
+# Test + dev tooling. Hypothesis drives the property-based tests (Python side).
+test = [
+    "pytest==9.1.1",
+    "hypothesis==6.170.2",
+]
+# Model_Path tooling (Milestone 7). Pinned here so it is available but not
+# required for the credential-free Mock_Runtime backbone.
+model = [
+    "onnx==1.23.2",
+]
+
+[project.scripts]
+# Credential-free smoke check: verifies the installed OpenCV is major version 5.
+verify-opencv = "vision.verify_opencv:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["vision", "agent"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
