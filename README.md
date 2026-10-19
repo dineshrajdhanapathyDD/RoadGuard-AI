@@ -1,115 +1,172 @@
-# RoadGuard AI
+﻿# RoadGuard AI
 
-Agentic road-safety inspection platform for the OpenCV + AWS AI Competition 2026
-(Agentic Vision focus, submission deadline October 26, 2026).
+> Agentic road-safety inspection platform for the **OpenCV + AWS AI Competition 2026** (Agentic Vision Award focus).
 
-RoadGuard AI ingests a road video, runs a **real OpenCV 5** computer-vision
-pipeline, and drives a bounded reasoning agent whose next action is determined
-by genuine vision output. The full perception-decision-action loop and its test
-suite run locally with no AWS credentials via a deterministic Mock_Runtime.
+RoadGuard AI ingests a road video, runs a **real OpenCV 5** computer-vision pipeline, and drives a **bounded reasoning agent** whose next action is determined by genuine vision output. Perception decides action: the agent only escalates to a detailed region analysis when the vision stage actually detects damage above threshold.
 
-See the spec in `.kiro/specs/roadguard-ai/` (`requirements.md`, `design.md`,
-`tasks.md`) for the authoritative requirements and architecture.
+The full perception-decision-action loop runs **offline** (deterministic Mock_Runtime, no AWS creds) for development and CI, and runs **live on AWS** in production via Amazon Bedrock AgentCore Runtime + ECS Fargate.
 
-## Monorepo layout
+---
+
+## Live demo
+
+| Resource | URL |
+| --- | --- |
+| Dashboard (Amplify Hosting) | https://main.d1mue3zctzzbg9.amplifyapp.com/ |
+| REST API (API Gateway) | https://7p1i7iqoyb.execute-api.us-east-1.amazonaws.com/dev/ |
+
+Quick check:
+
+```
+curl https://7p1i7iqoyb.execute-api.us-east-1.amazonaws.com/dev/overview
+```
+
+Returns live inspection counts and the latest agent decision traces backed by DynamoDB.
+
+> Note: the live stack bills to a personal AWS account and may be torn down after judging. The offline path below reproduces the full agent loop with zero AWS dependency.
+
+---
+
+## Why this is agentic vision
+
+The agent is not a scripted pipeline. Each step the agent takes is chosen from real OpenCV output:
+
+1. `analyze_frame` runs OpenCV 5 detection on a sampled frame.
+2. The decider inspects the detection confidence from that frame.
+3. **Only if** damage confidence crosses threshold does the agent call `analyze_region` for a detailed bounded-region pass.
+4. Every decision is persisted as a trace step (timestamp, tool, inputs, confidence) for auditability.
+
+A verified live trace: `ts=0 analyze_frame (surface_damage 0.754)` to `ts=1 analyze_region (before_conf=0.754)`. The second action exists **because** the first detection fired. Remove the detection and the agent never escalates. That causal link between vision and action is the core of the submission.
+
+---
+
+## Architecture
+
+```
+                         +---------------------------+
+   road video  ---->     |  ECS Fargate (OpenCV 5)   |   real cv2 pipeline:
+                         |  vision/worker_main.py    |   decode -> sample ->
+                         +-------------+-------------+   detect -> annotate
+                                       |
+                                       v
+                         +---------------------------+
+                         |  Amazon Bedrock AgentCore |   bounded reasoning loop
+                         |  Runtime (roadguardagent) |   7 tools, decider picks
+                         +-------------+-------------+   next action from vision
+                                       |
+                 +---------------------+---------------------+
+                 v                     v                     v
+          +-------------+      +--------------+      +---------------+
+          |  DynamoDB   |      |   S3 (evid.) |      |  Lambda x3 +  |
+          | single-tbl  |      |   bucket     |      |  API Gateway  |
+          +------+------+      +--------------+      +-------+-------+
+                 |                                           |
+                 +---------------------+---------------------+
+                                       v
+                         +---------------------------+
+                         |  Amplify Hosting (React)  |  dashboard: inspections,
+                         |  frontend/                |  traces, confidence charts
+                         +---------------------------+
+```
+
+---
+
+## Tech stack
+
+- **Vision:** OpenCV 5, Python, NumPy. Classical detector with optional ONNX model path.
+- **Agent:** Bounded reasoning loop, 7 tools, pluggable decider (Mock_Runtime offline / Amazon Bedrock online).
+- **Runtime:** Amazon Bedrock AgentCore Runtime (managed agent), ECS Fargate (vision worker).
+- **Data/API:** DynamoDB single-table (GSI1/2/3), S3, Lambda, API Gateway.
+- **Frontend:** React + Vite + TypeScript + Tailwind + Recharts, hosted on AWS Amplify.
+- **IaC:** AWS CDK (TypeScript synth) for the backend stack; CloudFormation for AgentCore.
+- **Tests:** pytest + Hypothesis (property tests), Vitest for the frontend.
+
+---
+
+## Repository layout
 
 ```
 roadguard-ai/
-  vision/            Python OpenCV 5 pipeline (decode, sample, detect, annotate)
-    verify_opencv.py   credential-free OpenCV-5 smoke check
-    samples/           sample-video generator + fetch script (real-decode tests)
-  agent/             Python agent layer (bounded loop, 7 tools, decider/store abstractions)
-  frontend/          TypeScript dashboard (React + Vite + Tailwind + Recharts)
-  infra/             Infrastructure as Code (AWS CDK/CloudFormation) - Milestone 6
-  tests/             Python tests (pytest + Hypothesis property tests)
-  pyproject.toml     Python project + exact pinned dependencies
-  requirements.txt   pip mirror of runtime deps (exact pins)
-  requirements-dev.txt  pip mirror of test/dev deps (exact pins)
+  vision/              OpenCV 5 pipeline (decode, sample, detect, annotate)
+    verify_opencv.py     credential-free OpenCV-5 smoke check
+    worker_main.py       Fargate entrypoint (real cv2 end-to-end)
+    samples/             sample-video generator + fetch script
+  agent/               bounded loop, 7 tools, decider/store abstractions
+  agentcore/           AgentCore Runtime entrypoint + requirements
+  frontend/            React + Vite dashboard (live API client)
+  infra/               AWS CDK stack (API, Lambda, DynamoDB, S3, Fargate, VPC)
+  tests/               pytest + Hypothesis property tests
+  amplify.yml          Amplify Hosting build spec
+  pyproject.toml       Python project + exact pinned dependencies
 ```
 
-## Pinned dependencies
+Authoritative spec: `.kiro/specs/roadguard-ai/` (`requirements.md`, `design.md`, `tasks.md`).
 
-All versions are pinned exactly (no open ranges) for reproducible deliverables.
+---
 
-Python (`pyproject.toml` / `requirements*.txt`):
+## Quick start (offline, no AWS)
 
-| Package | Version | Role |
-| --- | --- | --- |
-| opencv-python | 5.0.0.93 | OpenCV 5 vision pipeline |
-| numpy | 2.2.6 | array math |
-| boto3 | 1.43.114 | AWS SDK (Milestone 6) |
-| strands-agents | 1.61.1 | agent runtime SDK (Milestone 7) |
-| pytest | 9.1.1 | test runner (dev) |
-| hypothesis | 6.170.2 | property-based tests (dev) |
-| onnx | 1.23.2 | Model_Path tooling (optional, Milestone 7) |
+```
+# 1. install pinned deps
+pip install -r requirements.txt -r requirements-dev.txt
 
-Frontend (`frontend/package.json`):
+# 2. verify OpenCV 5 is wired correctly
+python vision/verify_opencv.py
 
-| Package | Version | Role |
-| --- | --- | --- |
-| react / react-dom | 19.3.1 | UI |
-| vite | 8.3.4 | build/dev server |
-| @vitejs/plugin-react | 6.1.2 | React plugin |
-| tailwindcss / @tailwindcss/vite | 4.3.3 | styling |
-| recharts | 3.10.1 | metrics charts |
-| fast-check | 4.10.2 | property-based tests (TS) |
-| vitest | 5.0.5 | test runner |
-| typescript | 5.9.3 | types (see note below) |
-| @testing-library/react | 16.3.3 | render tests |
-| jsdom | 30.1.3 | test DOM |
+# 3. run the full test suite (32 Python + property tests)
+pytest
 
-**TypeScript pin note:** npm's `latest` tag for `typescript` is currently the
-`7.x` native-compiler preview line. We pin the stable **5.9.3** for
-compatibility with the React type definitions, the Vite React plugin, and
-Vitest. Revisit when the 7.x toolchain ecosystem stabilizes.
-
-## OpenCV 5 availability (verified)
-
-The task flagged that an OpenCV 5.x prebuilt wheel might not be installable.
-**Verified on this environment** (Windows, Python 3.13):
-
-- `opencv-python==5.0.0.93` **is** published on PyPI as a prebuilt wheel and
-  installs cleanly.
-- After install, `import cv2; cv2.__version__` reports **`5.0.0`** (major 5).
-
-So RoadGuard pins a genuine OpenCV 5 wheel - it does **not** fall back to
-OpenCV 4 while claiming 5.x compliance. If you are on a platform or Python
-version without a 5.x wheel, `vision/verify_opencv.py` reports the **actual**
-installed version and whether it meets the major-version-5 requirement, and
-exits non-zero (fails loudly) rather than passing silently.
-
-## Quick start
-
-### Python (vision + agent, credential-free)
-
-```bash
-python -m pip install -r requirements-dev.txt     # or: pip install -e ".[test,model]"
-
-# OpenCV 5 smoke check (no AWS needed) - exits 0 only if major version is 5
-python -m vision.verify_opencv
-
-# Generate tiny license-clean sample road clips for real-decode tests
-python -m vision.samples.make_samples
-
-# Run the Python test suite
-python -m pytest
+# 4. run the agent loop against the deterministic Mock_Runtime
+python -m agent.run_demo
 ```
 
-### Frontend
+The frontend:
 
-```bash
+```
 cd frontend
 npm install
-npm run test        # vitest
-npm run build       # type-check + production build
-npm run dev         # local dev server
+npm run dev      # uses MockApiClient when VITE_API_BASE_URL is unset
+npm test         # Vitest
 ```
 
-## Reproducibility and security
+---
 
-- The Mock_Runtime + real OpenCV 5 path (Milestones 1-5, 8) runs the full agent
-  loop and test suite with **no AWS credentials** (Requirement 19.4, Competition 4).
-- No credentials or secrets are committed; secrets are resolved at runtime from a
-  managed source (Requirement 18.5). `.env*` and key files are git-ignored.
-- Sample videos are generated locally (or fetched from documented, openly
-  licensed sources) rather than committing third-party footage.
+## Deploy (live AWS)
+
+```
+# backend stack (API, Lambda, DynamoDB, S3, Fargate, VPC)
+cd infra
+npm install
+npx aws-cdk@2.1145.0 deploy -c environment=dev
+
+# AgentCore Runtime (managed agent)
+cd ../agentcore_app/roadguardagent
+agentcore deploy
+```
+
+Point the dashboard at the live API by setting `VITE_API_BASE_URL` in `frontend/.env.production`, then deploy via Amplify using the root `amplify.yml`.
+
+**Teardown (stop billing):**
+
+```
+cd infra && npx aws-cdk@2.1145.0 destroy -c environment=dev
+cd agentcore_app/roadguardagent && agentcore destroy
+```
+
+---
+
+## Judging rubric mapping
+
+| Criterion | Where it shows up |
+| --- | --- |
+| Agentic Vision | Agent action is causally gated on real OpenCV detection confidence; traces prove the link. |
+| Real computer vision | OpenCV 5 pipeline runs on ECS Fargate, verified exit 0 end-to-end on real video. |
+| Production AWS | Bedrock AgentCore Runtime, Lambda, API Gateway, DynamoDB, S3, Fargate, Amplify - all live. |
+| Reproducibility | Offline Mock_Runtime + 32 tests run with zero AWS credentials. |
+| Observability | Every agent decision persisted as an auditable trace step in DynamoDB. |
+
+---
+
+## Responsible use
+
+RoadGuard AI is a road-infrastructure inspection aid. It flags candidate surface damage for human review; it is not an authority on road safety and should not replace qualified inspection. Evidence images are stored in a private S3 bucket. The system processes road-surface imagery only and is not designed for identifying people or vehicles.
