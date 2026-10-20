@@ -87,10 +87,14 @@ class DynamoStore:
     def put_inspection(self, record: dict[str, Any]) -> None:
         iid = record["inspection_id"]
         item = {
+            **record,
+            # Derived keys come AFTER the spread so a stale GSI1PK carried in
+            # ``record`` (e.g. re-saving a bundle read back from DynamoDB on
+            # completion) cannot clobber the value computed from the current
+            # status. This keeps the GSI1 status index in sync with META.
             "PK": f"INSPECTION#{iid}", "SK": "META",
             "GSI1PK": f"STATUS#{record.get('status', 'pending')}",
             "GSI1SK": str(record.get("upload_ts", "")),
-            **record,
         }
         _with_retries(lambda: _table().put_item(Item=_to_dynamo(item)))
 
@@ -109,18 +113,18 @@ class DynamoStore:
 
     def enqueue_review(self, inspection_id: str, item_data: dict[str, Any], seq: int) -> None:
         item = {
+            **item_data,
             "PK": f"INSPECTION#{inspection_id}", "SK": f"REVIEW#{seq:06d}",
             "GSI2PK": f"REVIEW_STATUS#{item_data.get('status', 'open')}",
             "GSI2SK": f"{inspection_id}#{seq:06d}",
-            **item_data,
         }
         _with_retries(lambda: _table().put_item(Item=_to_dynamo(item)))
 
     def put_metrics(self, inspection_id: str, metrics: dict[str, Any], upload_ts: str = "") -> None:
         item = {
+            **metrics,
             "PK": f"INSPECTION#{inspection_id}", "SK": "METRICS",
             "GSI3PK": "METRICS", "GSI3SK": upload_ts,
-            **metrics,
         }
         _with_retries(lambda: _table().put_item(Item=_to_dynamo(item)))
 

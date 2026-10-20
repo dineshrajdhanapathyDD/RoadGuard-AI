@@ -34,6 +34,7 @@ from aws_cdk import (
     aws_cloudfront_origins as origins,
     aws_dynamodb as ddb,
     aws_ec2 as ec2,
+    aws_ecr as ecr,
     aws_ecs as ecs,
     aws_iam as iam,
     aws_lambda as lambda_,
@@ -61,9 +62,10 @@ class RoadGuardStack(Stack):
 
         bucket = self._evidence_bucket()
         table = self._table()
-        self._backend(bucket, table)
+        # Build the Fargate worker first so the backend can wire the upload->RunTask
+        # trigger to it. Dashboard is served by Amplify Hosting (not CloudFront here).
         self._vision_worker(bucket, table)
-        self._dashboard_site()
+        self._backend(bucket, table)
 
     # -- Dashboard static site: private S3 + CloudFront (OAC) ------------- #
 
@@ -225,6 +227,34 @@ class RoadGuardStack(Stack):
         table.grant_read_data(read_fn)
         table.grant_read_write_data(inspection_fn)
 
+        # --- Wire upload -> Fargate worker (the missing trigger) -------------
+        # The inspection Lambda launches the Vision_Worker Fargate task to run
+        # the real OpenCV pipeline + Nova reasoning. We pass the cluster, task
+        # def, subnets, security group, and container name as env, and grant
+        # ecs:RunTask + PassRole so the Lambda can start the task.
+        vpc = self._worker_vpc
+        subnet_ids = [s.subnet_id for s in vpc.private_subnets] or [s.subnet_id for s in vpc.public_subnets]
+        worker_sg = ec2.SecurityGroup(self, "WorkerTaskSg", vpc=vpc, allow_all_outbound=True)
+        inspection_fn.add_environment("WORKER_CLUSTER_ARN", self._worker_cluster.cluster_arn)
+        inspection_fn.add_environment("WORKER_TASK_DEF_ARN", self._worker_task_def.task_definition_arn)
+        inspection_fn.add_environment("WORKER_CONTAINER_NAME", self._worker_container_name)
+        inspection_fn.add_environment("WORKER_SUBNETS", ",".join(subnet_ids))
+        inspection_fn.add_environment("WORKER_SECURITY_GROUP", worker_sg.security_group_id)
+
+        inspection_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["ecs:RunTask"],
+                resources=[self._worker_task_def.task_definition_arn],
+            )
+        )
+        # PassRole for the task execution + task roles (required by ecs:RunTask).
+        pass_roles = [self._worker_task_def.task_role.role_arn]
+        if self._worker_task_def.execution_role is not None:
+            pass_roles.append(self._worker_task_def.execution_role.role_arn)
+        inspection_fn.add_to_role_policy(
+            iam.PolicyStatement(actions=["iam:PassRole"], resources=pass_roles)
+        )
+
         # REST API, TLS-only by nature (API Gateway endpoints are HTTPS), with
         # request validation and access logging + throttling (18.x).
         access_logs = logs.LogGroup(
@@ -279,12 +309,15 @@ class RoadGuardStack(Stack):
         # Dockerfile.worker (Milestone 6 task 12.5). CDK builds it with local
         # Docker and pushes it to ECR on deploy; the task then runs the real
         # OpenCV pipeline + agent loop (vision.worker_main).
-        repo_root = str(Path(__file__).resolve().parent.parent)
+        # Use the PRE-BUILT image already pushed to ECR (built + pushed out of
+        # band with `docker build`/`docker push`), so `cdk synth`/`deploy` needs
+        # NO local Docker build. Rebuild + push the image to update the worker.
+        worker_repo = ecr.Repository.from_repository_name(
+            self, "VisionWorkerRepo", "roadguard-vision-worker"
+        )
         task_def.add_container(
             "VisionWorker",
-            image=ecs.ContainerImage.from_asset(
-                repo_root, file="Dockerfile.worker"
-            ),
+            image=ecs.ContainerImage.from_ecr_repository(worker_repo, tag="latest"),
             logging=ecs.LogDriver.aws_logs(
                 stream_prefix="vision-worker",
                 log_retention=logs.RetentionDays.ONE_MONTH,  # CloudWatch (18.6)
@@ -292,7 +325,9 @@ class RoadGuardStack(Stack):
             environment={
                 "ROADGUARD_TABLE": table.table_name,
                 "EVIDENCE_BUCKET": bucket.bucket_name,
-                "RUNTIME": "mock",
+                # Live Amazon Nova reasoning via Strands + Bedrock (ECS does it all).
+                "RUNTIME": "bedrock",
+                "BEDROCK_MODEL_ID": "us.amazon.nova-lite-v1:0",
             },
         )
 
@@ -303,6 +338,17 @@ class RoadGuardStack(Stack):
         task_def.task_role.add_to_principal_policy(
             iam.PolicyStatement(
                 actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
-                resources=["*"],  # scope to specific model ARNs at deploy time
+                # Nova is invoked via a cross-region inference profile, so allow both
+                # the inference-profile and the underlying foundation-model ARNs.
+                resources=[
+                    f"arn:aws:bedrock:*:{Stack.of(self).account}:inference-profile/*",
+                    "arn:aws:bedrock:*::foundation-model/*",
+                ],
             )
         )
+
+        # Expose the worker wiring so _backend can launch it on upload (ecs:RunTask).
+        self._worker_cluster = cluster
+        self._worker_task_def = task_def
+        self._worker_vpc = vpc
+        self._worker_container_name = "VisionWorker"

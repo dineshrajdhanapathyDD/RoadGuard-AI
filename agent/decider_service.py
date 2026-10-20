@@ -48,7 +48,7 @@ from __future__ import annotations
 import os
 from typing import Protocol, runtime_checkable
 
-from agent.state import AgentDecision, InspectionState, ToolName
+from agent.state import TOOL_NAMES, AgentDecision, InspectionState, ToolName
 from vision.result_schema import AnalysisResult, Detection
 
 # --------------------------------------------------------------------------- #
@@ -311,7 +311,7 @@ def _focus_bbox(perception: AnalysisResult) -> tuple[int, int, int, int]:
 # --------------------------------------------------------------------------- #
 
 #: Default Bedrock model id for the live runtime; override with BEDROCK_MODEL_ID.
-_DEFAULT_BEDROCK_MODEL_ID = "anthropic.claude-3-5-sonnet-20241022-v2:0"
+_DEFAULT_BEDROCK_MODEL_ID = "us.amazon.nova-lite-v1:0"  # Amazon Nova (fast, AWS-native)
 
 
 class BedrockDecider:
@@ -396,27 +396,47 @@ class BedrockDecider:
         # the perception-based choice (19.1).
         baseline = self._fallback.decide(state, perception)
         try:  # pragma: no cover - requires live Bedrock
+            best_conf = max(
+                (float(d.get("confidence", 0.0)) for d in (perception.get("detections") or [])),
+                default=0.0,
+            )
             prompt = (
                 f"state: iteration={state.iteration}/{state.max_iterations}. "
                 f"perception: status={perception.get('status')}, "
                 f"method={perception.get('method')}, "
                 f"detections={len(perception.get('detections') or [])}, "
-                f"best_confidence={max((float(d.get('confidence', 0.0)) for d in (perception.get('detections') or [])), default=0.0):.2f}, "
+                f"best_confidence={best_conf:.2f}, "
                 f"quality_flags={[f.get('code') for f in (perception.get('quality_flags') or [])]}. "
-                "Choose the next tool (reply with only the tool name)."
+                "Decide the single next tool and explain briefly. "
+                "Reply on ONE line as: <tool_name> | <one short sentence of reasoning>."
             )
-            raw = str(agent(prompt)).strip().lower()
-            chosen = next((t for t in TOOL_NAMES if t in raw), None)
+            raw = str(agent(prompt)).strip()
+            # Parse "<tool> | <reason>"; be tolerant if the model omits the pipe.
+            head, _, tail = raw.partition("|")
+            lowered = head.lower() if tail else raw.lower()
+            chosen = next((t for t in TOOL_NAMES if t in lowered), None)
             if chosen is None:
                 return baseline  # out-of-vocabulary -> honest fallback (5.5)
+            model_reason = tail.strip() if tail.strip() else raw.strip()
+            # The perception-driven baseline is the structured ARGUMENTS source and
+            # safety net: its arguments are valid by construction (they always carry
+            # a real frame_ref from the perception). We keep those arguments and the
+            # baseline tool so every tool call is well-formed, and we surface the
+            # MODEL's own natural-language reasoning for the dashboard. When Nova
+            # would pick a different in-vocabulary tool we record that transparently
+            # in the reasoning rather than emitting an argument-less (invalid) call.
             if chosen == baseline.tool_name.value:
-                return baseline  # same tool -> reuse the mock's valid arguments
-            # Different valid tool: reuse the baseline arguments when compatible,
-            # else emit a minimal valid decision for the chosen tool.
+                reason = f"Amazon Nova (Bedrock): {model_reason}"
+            else:
+                reason = (
+                    f"Amazon Nova (Bedrock): {model_reason} "
+                    f"[model leaned toward {chosen}; proceeding with the "
+                    f"perception-validated {baseline.tool_name.value}]"
+                )
             return AgentDecision.of(
-                chosen,
-                baseline.arguments if baseline.tool_name.value == chosen else {},
-                reasoning=f"bedrock chose {chosen} (perception-driven); mock baseline was {baseline.tool_name.value}",
+                baseline.tool_name.value,
+                baseline.arguments,
+                reasoning=reason[:400],
             )
         except Exception:
             return baseline

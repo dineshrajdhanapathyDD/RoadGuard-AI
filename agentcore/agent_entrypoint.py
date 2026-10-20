@@ -67,8 +67,27 @@ def invoke(payload: dict[str, Any]) -> dict[str, Any]:
     if action == "ping":
         return {"status": "ok", "service": "roadguard-agent", "runtime": _runtime_name()}
 
+    # Consolidated path: run the FULL inspection (OpenCV 5 pipeline + agent loop +
+    # Nova reasoning) inside this single AgentCore container, persisting results to
+    # DynamoDB/S3. This is the "video -> AgentCore -> frontend" flow; the dashboard
+    # then reads the results from DynamoDB via read_handler (no frontend change).
+    if action == "inspect":
+        p = payload or {}
+        inspection_id = str(p.get("inspection_id", "")).strip()
+        object_key = str(p.get("object_key", "")).strip()
+        bucket = str(p.get("bucket", "") or p.get("evidence_bucket", "")).strip()
+        if not inspection_id or not object_key or not bucket:
+            return {"error": "invalid_inspect_request",
+                    "detail": "payload must include inspection_id, object_key, bucket"}
+        # Import lazily so the decision-only path and local dev stay light and so
+        # a missing OpenCV never breaks `action=decide`.
+        from vision.inspection_job import run_inspection_job
+        summary = run_inspection_job(inspection_id, object_key, bucket)
+        return {"summary": summary, "runtime": _runtime_name()}
+
     if action != "decide":
-        return {"error": "unsupported_action", "detail": f"unknown action {action!r}; expected 'decide'"}
+        return {"error": "unsupported_action",
+                "detail": f"unknown action {action!r}; expected 'decide', 'inspect', or 'ping'"}
 
     perception = (payload or {}).get("perception")
     if not isinstance(perception, dict) or "status" not in perception:

@@ -1,5 +1,8 @@
-# AgentCore agent runtime deps (Option A: agent reasoning only, NO OpenCV).
+# AgentCore consolidated runtime deps: ONE container runs OpenCV 5 vision +
+# the Nova-backed reasoning agent (supersedes the Option A "NO OpenCV" split).
 # Pinned to the versions verified in this environment.
 bedrock-agentcore==1.23.0
 strands-agents==1.48.0
 boto3==1.43.114
+opencv-python==5.0.0.93
+numpy==2.2.6

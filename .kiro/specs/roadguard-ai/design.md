@@ -581,3 +581,55 @@ A dual approach: property-based tests for universal invariants and example/integ
 **Frontend tests**: React Testing Library snapshot/render tests for the overview, inspection, agent-trace, report, and metrics views (16.1-16.4, 15.4), including the agent-trace view rendering the before-output / reasoning / tool / after-output / decision sequence that evidences the critical criterion (14.2).
 
 **E2E**: an end-to-end inspection (upload -> validate -> process real OpenCV -> agent loop -> report + trace + metrics) that demonstrates real OpenCV 5 output changing a subsequent tool call, runnable under the Mock_Runtime for reproducibility (Competition 1, Competition 4).
+
+
+## Addendum: Single-Runtime Consolidation (video -> AgentCore -> frontend)
+
+> Status: design for the architecture change requested after Milestone 9. Supersedes the Option A split (agent-only on AgentCore, OpenCV on Fargate) with a single managed runtime. Earlier sections describing the Fargate Vision_Worker remain for history; this addendum is the authoritative target.
+
+### Goal
+
+One path, one picture: a user uploads a short road video, Amazon Bedrock AgentCore Runtime runs the REAL OpenCV 5 pipeline AND the Nova-backed reasoning agent in a single container, persists findings/trace/metrics to DynamoDB, and the existing dashboard renders them. No Fargate worker, no second brain.
+
+### Target data flow
+
+1. Client requests a presigned PUT and uploads the video to S3 (unchanged).
+2. ``inspection_handler`` (Lambda) creates the inspection META (status=processing) and invokes the AgentCore Runtime asynchronously with ``{inspection_id, object_key, bucket}`` (replaces the never-wired Fargate RunTask).
+3. AgentCore Runtime (single container): downloads the video from S3, runs the OpenCV 5 Vision_Pipeline, drives the bounded agent loop with the BedrockDecider (Amazon Nova), and persists trace/findings/review/metrics + a completed META to the DynamoDB single table. Evidence frames go to S3.
+4. ``read_handler`` (Lambda) serves overview/report/trace/metrics from DynamoDB. The dashboard polls these and renders the Nova reasoning trace and findings.
+
+Because the dashboard reads only from DynamoDB via read_handler, it is agnostic to what produced the data: moving the writer from Fargate to AgentCore requires NO frontend or read-path change. That is the seam that makes this consolidation low-risk on the presentation side.
+
+### What moves where
+
+| Concern | Before (Option A) | After (single runtime) |
+| --- | --- | --- |
+| OpenCV 5 decode + detection | Fargate Vision_Worker | AgentCore container |
+| Agent loop + 7 tools | Fargate Vision_Worker | AgentCore container |
+| Reasoning backend | Bedrock (decision-only service) | Amazon Nova via Strands, in-process |
+| Trigger | inspection_handler -> (unwired) RunTask | inspection_handler -> AgentCore InvokeAgentRuntime (async) |
+| Persistence (DynamoDB/S3) | Fargate role | AgentCore execution role |
+| Dashboard read path | read_handler (DynamoDB) | read_handler (DynamoDB) - unchanged |
+
+### AgentCore entrypoint change
+
+The entrypoint gains a second action alongside the existing ``decide``:
+
+- ``action="inspect"`` with ``{inspection_id, object_key, bucket}``: runs the full pipeline+loop (the same orchestration ``vision/worker_main.py`` performs today) and returns a completion summary. Long-running work runs inside the AgentCore invocation; status/trace are observable in DynamoDB as they are written.
+- ``action="decide"`` (existing) and ``action="ping"`` are retained for the decision-only contract and health checks.
+
+The image now bundles OpenCV 5 + NumPy + the vision package (the ``requirements.txt`` "NO OpenCV" constraint is lifted for the consolidated image). The agent/vision code is unchanged source; only the hosting container and the trigger change.
+
+### Reasoning backend: Amazon Nova
+
+The live ``BedrockDecider`` uses ``us.amazon.nova-lite-v1:0`` (inference profile) by default, overridable via ``BEDROCK_MODEL_ID``. Each decision stores the model's own one-line reasoning (prefixed ``Amazon Nova (Bedrock): ...``) in the trace so the dashboard shows genuine LLM reasoning. Tool arguments always come from the perception-validated baseline so every tool call is well-formed; on any Bedrock error the decider falls back to the deterministic MockDecider, keeping the loop bounded and honest.
+
+### Decommission
+
+Once the AgentCore path is verified end-to-end, remove the Fargate/ECS/ECR/VPC-NAT resources and the unused CloudFront dashboard code from the CDK stack, and delete the standalone decision-only runtime. Retain: S3 (upload + evidence), DynamoDB (single table), API Gateway + upload/inspection/read Lambdas, Amplify (dashboard), and the AgentCore Runtime. This is the "remove other deploy things" cleanup and must be explicitly confirmed before any resource is destroyed.
+
+### Trade-offs (honest)
+
+- Per-inspection latency grows to tens of seconds because every reason step calls Bedrock; acceptable for an async, dashboard-polled flow.
+- The AgentCore image is larger (OpenCV bundled); offsets the removed Fargate/NAT cost.
+- The offline Mock_Runtime backbone and all 36 tests are unaffected: the same vision + agent source runs, only the host and reasoning backend differ.
